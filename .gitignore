@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.env
+.data/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/invoices/*.pdf
+playwright-report/
+
+# Generated Python packaging metadata
+*.egg-info/
