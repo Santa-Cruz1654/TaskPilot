@@ -1,43 +1,53 @@
 # TaskPilot — Autonomous AI Task Worker
 
-TaskPilot is a local, synthetic-data prototype of an autonomous business task worker. It accepts a natural-language instruction, orchestrates a browser-based invoice workflow, and independently verifies the result.
+TaskPilot is a local prototype that processes synthetic invoices through a browser-based workflow. It accepts a natural-language request, observes invoice candidates in a simulated inbox, extracts and validates invoice data from a PDF, checks for an existing finance record, and—when a new record is proposed—waits for human approval before submitting the finance form.
 
-The project's completed scope is **invoice processing with duplicate prevention and human approval before new finance writes**. It is not intended to be a general-purpose computer-use agent.
+TaskPilot is deliberately scoped to invoice processing in a local synthetic environment. It is not a general-purpose computer-use agent or a production accounting system.
 
 ## Features
 
-- **Natural-language task intake** through the FastAPI dashboard and API.
-- **LangGraph orchestration** for task validation, inbox observation, invoice selection, extraction, approval, writing, and verification.
-- **Two planner modes:** a deterministic mode for predictable local runs and an LLM mode using a Gemini model through an OpenAI-compatible endpoint.
-- **Playwright browser automation** to inspect the synthetic inbox, download invoice documents, and interact with the simulated finance application.
-- **PDF extraction and validation** using `pypdf` and Pydantic.
-- **Human approval before new writes:** TaskPilot persists the proposed invoice and pauses in `pending_approval` until a person approves or rejects it.
-- **Exact approval matching:** the stored approval is checked against the source invoice and extracted invoice fields before a finance write proceeds.
-- **Duplicate prevention:** existing matching records follow a verification path and do not need approval or another write.
-- **Independent read-back verification:** after a new write, TaskPilot reads the finance record back and checks eight fields.
-- **SQLite persistence and audit trail** for task statuses, approval decisions, workflow events, and finance records.
-- **Task history and detail views** for reviewing the result, timeline, invoice fields, and verification evidence.
+- **Natural-language task intake** through a FastAPI dashboard and API.
+- **Two planner modes:** deterministic request interpretation and an LLM planner that returns a constrained, structured invoice-selection decision.
+- **LangGraph workflow for the LLM path:** validates the request and planner decision, manages workflow state, and routes supported terminal states.
+- **Playwright browser automation** to inspect the synthetic inbox, download invoice PDFs, and interact with the simulated finance application.
+- **PDF extraction and schema validation** using `pypdf` and Pydantic.
+- **Source/document consistency checks:** extracted vendor, invoice number, and issue date are compared with the selected inbox row.
+- **Duplicate handling:** an existing finance record is read and compared with the source invoice; TaskPilot does not submit a second write for a matching record.
+- **Human approval before a new finance write:** the proposed invoice is persisted and the task enters `pending_approval`.
+- **Approval matching:** before a write, the stored approval must match both the source invoice ID and the extracted invoice fields.
+- **Independent read-back verification:** after a new write, TaskPilot reads the finance record from SQLite and compares eight required fields.
+- **SQLite persistence:** synthetic inbox records, finance records, task status, approval decisions, and task events.
+- **Task history and detail pages** to inspect status, events, invoice data, approval controls, and results.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
     U[User request] --> API[FastAPI dashboard and API]
-    API --> G[LangGraph workflow]
-    G --> O[Observe synthetic inbox with Playwright]
-    O --> P[Plan and select invoice]
-    P --> D[Download PDF and extract validated fields]
+    API --> W[Task worker]
+    W --> O[Observe synthetic inbox with Playwright]
+    O --> P[Select invoice using deterministic or LLM planner]
+    P --> D[Download PDF and validate extracted fields]
     D --> X{Matching finance record exists?}
-    X -->|Yes| V1[Verify existing record]
-    X -->|No| A[Persist proposal and request human approval]
-    A -->|Rejected| R[Finish without a finance write]
-    A -->|Approved| W[Submit finance form with Playwright]
-    W --> V2[Independent database read-back verification]
-    V1 --> DB[(SQLite task, event, and finance data)]
+
+    X -->|Yes| V1[Read and verify existing record]
+    X -->|No| A[Persist invoice proposal]
+    A --> PA[Wait for human decision]
+
+    PA -->|Rejected| R[End without finance write]
+    PA -->|Approved| M{Approval matches exact proposal?}
+    M -->|No| B[Block finance write]
+    M -->|Yes| W2[Submit finance form with Playwright]
+
+    W2 --> V2[Independent SQLite read-back verification]
+    V1 --> DB[(SQLite task, event, approval and finance data)]
     V2 --> DB
     R --> DB
-    DB --> OUT[Persisted task result and audit trail]
+    B --> DB
+    DB --> OUT[Persist task result and audit trail]
 ```
+
+**Execution-path note:** the LLM planner path is orchestrated with LangGraph. The deterministic planner path is handled by the worker's deterministic workflow. Both paths include invoice extraction, duplicate handling, the approval boundary for new writes, and verification logic; they are not the same internal execution path.
 
 ## Technology stack
 
@@ -48,81 +58,99 @@ flowchart TD
 - Pydantic
 - `pypdf`
 - SQLite
-- `uv`
+- `httpx` for the OpenAI-compatible LLM request
+- `uv` for dependency and environment management
 - Pytest
-- Gemini API through an OpenAI-compatible endpoint
+- Gemini-compatible OpenAI API endpoint by default, configurable through environment variables
 
 ## Safety and scope
 
-- Companies, invoices, PDFs, and finance records are synthetic demo data generated for local use.
-- The browser workflow targets the local TaskPilot application at `http://127.0.0.1:8000`.
-- TaskPilot is built for the defined invoice-processing workflow; arbitrary URL navigation, shell commands, email, payments, and unrestricted external-site actions are outside the supported scope.
-- Ambiguous or unsupported requests should stop for clarification rather than guess.
-- Existing matching invoices are verified without a second write and without requesting approval.
-- New finance writes require an explicit human approval decision.
-- Rejection ends the proposed write path without submitting the invoice.
-- Approval is persisted and matched against the exact source invoice and extracted fields. A mismatch blocks the write.
-- Completion after a new write requires an independent read-back comparison; a browser success message alone is insufficient.
-- Task status and workflow events are stored in SQLite for auditability.
+- The companies, invoices, generated PDFs, and finance records are synthetic demo data.
+- The default local application URL is `http://127.0.0.1:8000`; it can be overridden with `TASKPILOT_BASE_URL`.
+- The worker is designed for the invoice-processing workflow. Arbitrary shell commands, email, payments, and unrestricted external-site actions are outside its supported scope.
+- Requests that cannot be matched to a supported invoice should stop for clarification rather than inventing an invoice ID.
+- The LLM planner can only propose a constrained selection or request clarification. It does not perform browser actions or finance writes.
+- Existing matching finance records follow a read/verification path and do not require approval because no new write is proposed.
+- New finance writes require a persisted human approval decision.
+- Approval is checked against the exact source invoice ID and extracted invoice fields before the finance form is submitted.
+- A rejection is terminal and does not schedule the worker to resume the proposed write.
+- Finance records enforce uniqueness for `(vendor, invoice_number)`.
+- A new write is reported as successful only after independent read-back verification succeeds.
+- SQLite stores task status, approval data, and task events. This is a local prototype audit trail, not a tamper-proof enterprise audit system.
 
-This is a prototype, not a production-ready accounting system. Do not connect it to real financial systems or use confidential company information.
+**Do not connect this prototype to real accounting systems or use confidential company information.** It has not been hardened or validated for production use.
 
 ## Requirements
 
 - Python 3.12 or later
 - [`uv`](https://docs.astral.sh/uv/)
 - Playwright Chromium
+- An LLM provider API key only if using LLM planner mode
 
 ## Run locally
 
-Clone the repository and enter its directory. Replace the URL below with your GitHub repository URL:
+Clone the repository and enter the project directory. Replace the URL with your actual repository URL if needed:
 
 ```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
-cd taskpilot
+git clone https://github.com/Santa-Cruz1654/TaskPilot.git
+cd TaskPilot
 ```
 
-Install the dependencies and Chromium browser:
+Install project dependencies and the browser:
 
 ```bash
 uv sync --all-groups
 uv run playwright install chromium
 ```
 
-Create a local `.env` file for any required provider configuration. **Do not commit `.env` or API keys.**
+Create a local `.env` file if needed for provider configuration. **Never commit `.env`, API keys, or your local SQLite database.**
 
-Start TaskPilot in deterministic mode:
+### Deterministic planner mode
+
+In Git Bash:
 
 ```bash
 export TASKPILOT_PLANNER_MODE=deterministic
 uv run uvicorn app.main:app --env-file .env
 ```
 
-On Windows PowerShell, set the mode with:
+In Windows PowerShell:
 
 ```powershell
 $env:TASKPILOT_PLANNER_MODE = "deterministic"
 uv run uvicorn app.main:app --env-file .env
 ```
 
-To use the LLM planner instead, set `TASKPILOT_PLANNER_MODE=llm` in your environment and configure a valid provider API key in `.env`. The application supports these configuration variables:
+Deterministic mode does not require an LLM API key.
 
-- `TASKPILOT_PLANNER_MODE` — `deterministic` or `llm`.
-- `TASKPILOT_LLM_API_KEY` — provider API key; preferred configuration variable.
-- `TASKPILOT_LLM_MODEL` — model name, if overriding the configured default.
-- `TASKPILOT_LLM_BASE_URL` — OpenAI-compatible API base URL, if overriding the configured default.
+### LLM planner mode
 
-The LLM planner depends on provider availability and account quota. Deterministic mode is available for predictable local runs without an LLM request.
+Set `TASKPILOT_PLANNER_MODE=llm` and configure a valid provider key. The planner supports these environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `TASKPILOT_PLANNER_MODE` | `deterministic` or `llm` |
+| `TASKPILOT_LLM_API_KEY` | Preferred provider API key variable |
+| `GROQ_API_KEY` | Legacy-compatible API key variable |
+| `TASKPILOT_LLM_MODEL` | Optional model override |
+| `TASKPILOT_LLM_BASE_URL` | Optional OpenAI-compatible API base URL |
+| `TASKPILOT_BASE_URL` | Base URL for the local TaskPilot application |
+| `TASKPILOT_DATA_DIR` | Optional data directory override |
+| `TASKPILOT_DB_PATH` | Optional SQLite database path override |
+| `TASKPILOT_CHROMIUM_EXECUTABLE` | Optional Chromium executable override |
+
+The planner's configured default model and base URL are defined in `app/planner.py`. Provider availability, credentials, and quotas can affect LLM-mode execution.
 
 ## Local pages
 
 With the server running, open:
 
-- Dashboard / Worker: [http://127.0.0.1:8000/](http://127.0.0.1:8000/)
-- Task history: [http://127.0.0.1:8000/history](http://127.0.0.1:8000/history)
-- Synthetic inbox: [http://127.0.0.1:8000/inbox](http://127.0.0.1:8000/inbox)
-- Simulated finance application: [http://127.0.0.1:8000/finance](http://127.0.0.1:8000/finance)
-- API documentation: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- Dashboard / Worker: <http://127.0.0.1:8000/>
+- Synthetic inbox: <http://127.0.0.1:8000/inbox>
+- Simulated finance application: <http://127.0.0.1:8000/finance>
+- New finance record form: <http://127.0.0.1:8000/finance/new>
+- Task history: <http://127.0.0.1:8000/history>
+- API documentation: <http://127.0.0.1:8000/docs>
 
 ## Example workflow
 
@@ -132,78 +160,90 @@ Example request:
 Record invoice ALP-2026-023 from Alpine Manufacturing
 ```
 
-For an invoice without an existing finance record, TaskPilot extracts the fields and pauses at `pending_approval`. Open the task from the history page, review the proposed invoice data, and choose **Approve and submit invoice** or **Reject — do not write**.
+The exact invoice and its current finance-record state determine the path:
 
-- **Approved:** TaskPilot resumes, validates that the stored approval matches the exact invoice proposal, writes the finance record, and independently verifies the saved record.
-- **Rejected:** the task ends as `rejected` and the proposed finance write is not submitted.
-- **Duplicate:** if a matching record already exists, TaskPilot verifies that record and does not create a duplicate or request a write approval.
+1. TaskPilot observes the inbox and selects a candidate using the configured planner mode.
+2. It downloads the PDF and validates the extracted fields against the selected inbox row.
+3. If a matching finance record already exists, TaskPilot checks that record and does not submit a second write.
+4. If no matching finance record exists, TaskPilot persists the proposal and pauses at `pending_approval`.
+5. A person reviews the proposal on the task detail page and chooses **Approve and submit invoice** or **Reject — do not write**.
+6. On approval, TaskPilot resumes the task, re-observes and re-extracts the invoice, and checks that the persisted approval matches the exact source invoice and fields before submitting the finance form.
+7. After a new write, TaskPilot reads the finance record back and checks the saved fields. It reports completion only if verification passes.
+
+If the invoice data no longer matches the stored approval, the write is blocked. A rejected proposal is not submitted.
 
 ## Approval API
 
-Resolve a pending approval using:
+Endpoint:
 
-`POST /api/tasks/{task_id}/approval`
-
-Approve:
-
-```json
-{"decision":"approve"}
+```http
+POST /api/tasks/{task_id}/approval
 ```
 
-Reject:
+Approve a pending proposal:
 
 ```json
-{"decision":"reject"}
+{"decision": "approve"}
 ```
 
-The endpoint accepts a decision only while the task is `pending_approval`. A second decision receives HTTP `409`. The persisted approval is matched against the exact source invoice ID and extracted fields before the write proceeds.
+Reject a pending proposal:
 
-See the running API documentation at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for the current request and response schemas.
+```json
+{"decision": "reject"}
+```
+
+The request body accepts only `approve` or `reject`. The endpoint only resolves tasks in `pending_approval`. A successful decision returns HTTP `202`; a task that is missing returns `404`; an invalid body returns `422`; and a second or otherwise non-pending resolution returns `409`.
+
+Approval is persisted with the source invoice ID and exact invoice fields. On approval, the task is queued for worker execution. On rejection, the task becomes `rejected` and the worker is not resumed for the proposed write.
+
+See the running API documentation at <http://127.0.0.1:8000/docs> for request and response schemas.
 
 ## Independent verification
 
-After a new finance write, TaskPilot reads the record back independently and checks these eight fields:
+After a new finance write, TaskPilot reads the finance record back from SQLite and compares eight fields:
 
-1. Record existence
-2. Vendor
-3. Invoice number
-4. Issue date
-5. Due date
-6. Amount
-7. Currency
-8. Source document ID
+1. Record exists
+2. Vendor matches
+3. Invoice number matches
+4. Issue date matches
+5. Due date matches
+6. Amount matches
+7. Currency matches
+8. Source document ID matches
 
-A successful browser submission by itself is not considered proof of completion.
+A matching existing record is also checked against the source invoice before TaskPilot reports that it was already recorded. A browser success message alone is not treated as proof that the data was saved correctly.
 
 ## API overview
 
-- `POST /api/tasks` — create a task and start background execution. The request body includes a natural-language `request`.
+- `POST /api/tasks` — create a task; request body includes `{"request": "..."}`. Returns HTTP `202`.
 - `GET /api/tasks` — list recent tasks.
-- `GET /api/tasks/{task_id}` — retrieve task status, event history, and result.
+- `GET /api/tasks/{task_id}` — retrieve task status, event history, approval data, and result.
 - `POST /api/tasks/{task_id}/approval` — approve or reject a pending finance write.
-- `GET /api/finance/invoices/verify?vendor=...&invoice_number=...` — read-only invoice verification.
+- `GET /api/finance/invoices/verify?vendor=...&invoice_number=...` — read-only finance-record lookup.
+- `GET /invoices/{invoice_id}/download` — download a synthetic invoice PDF from the local application.
 
-Task states include `queued`, `running`, `needs_input`, `pending_approval`, `completed`, `failed`, and `rejected`.
+Task states used by the application include `queued`, `running`, `pending_approval`, `needs_input`, `completed`, `failed`, and `rejected`.
 
 ## Run tests
 
-For a deterministic test run in Git Bash:
+Run the test suite in deterministic mode from Git Bash:
 
 ```bash
 export TASKPILOT_PLANNER_MODE=deterministic
 uv run pytest
 ```
 
-The completed test suite reported **49 passed** in the deterministic configuration. LLM-mode behavior also depends on having a valid provider configuration and an available provider.
+The development run previously reported **49 passed** with deterministic planner mode enabled. Re-run the tests against your current checkout to confirm its current state. The tests include planner schema/configuration behavior, invoice extraction and validation, task and database behavior, API behavior, approval decisions, exact proposal matching, graph behavior, and worker behavior. Planner tests mock the provider rather than requiring live API calls.
 
 ## Project status and limitations
 
-The prototype has demonstrated:
+TaskPilot contains code and automated tests for the synthetic invoice-processing workflow, including approval handling, duplicate detection, and read-back verification. The test suite's passing result supports the behaviors covered by those tests; it does not by itself prove every end-to-end path or all failure conditions.
 
-- New invoice creation after human approval.
-- Rejection without a finance write.
-- Duplicate detection and verification without a second write.
-- Independent read-back verification of eight invoice fields.
-- Persisted task events and approval decisions.
+The current scope does **not** include:
 
-TaskPilot is feature-complete for this scoped synthetic invoice-worker prototype. General-purpose autonomous tasks, production deployment, and integration with real accounting systems are outside the current scope.
+- General-purpose autonomous computer use
+- Production deployment or production-grade security controls
+- Integration with real accounting or enterprise systems
+- Production-scale reliability, load, or security validation
+
+Treat this as a local engineering prototype. Describe individual behaviors as demonstrated only when you have verified them in a local run or can point to a test that covers the specific behavior.
